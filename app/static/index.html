@@ -44,19 +44,64 @@
   h3 { margin: 18px 0 8px; }
   .hint { color: #57606a; font-size: 12px; }
   code { background: var(--bg); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .tag.pending { background: #fff8c5; }
+  .tag.admitted { background: #dafbe1; }
+  .warn { background: #fff8c5; }
+  .bad { background: #ffebe9; }
+  .good { background: #dafbe1; }
 </style>
 </head>
 <body>
 <header><h1>口述史馆 · 禁播消音标记管理</h1></header>
 <nav>
-  <button data-tab="import" class="active">导入剪辑版</button>
+  <button data-tab="handover" class="active">交接收表</button>
+  <button data-tab="import">导入剪辑版</button>
   <button data-tab="versions">版本与遮盖</button>
   <button data-tab="markers">禁播标记</button>
 </nav>
 <main>
 
+<!-- ============ 交接收表 ============ -->
+<section id="tab-handover" class="tab active">
+  <div class="card">
+    <h3>按交接编号收表</h3>
+    <p class="hint">
+      <b>原录音剪辑表</b>直接取用原录音，沿用原 CSV：每行
+      <code>原录音号, 源起点ms, 源终点ms, 成片起点ms</code>。<br>
+      <b>二剪表</b>填一个直接上游的交接编号，每行
+      <code>上游起点ms, 上游终点ms, 本版起点ms</code>（上游成片坐标 → 本版成片坐标）。<br>
+      区间一律含起点、不含终点。二剪表可先暂存；补交或改交上游后自动逐级换算到原录音坐标，
+      跨剪接点自动拆段。所有片段都完整追溯后才整版入库，供禁播登记与遮盖查询使用。
+    </p>
+    <div class="row">
+      <label>交接编号 <input id="ho-no" size="18" placeholder="如：H-003"></label>
+      <label>版本名称 <input id="ho-name" size="20" placeholder="如：三剪短片"></label>
+      <label>类型 <select id="ho-kind">
+        <option value="recut">二剪表（recut）</option>
+        <option value="original">原录音剪辑表（original）</option>
+      </select></label>
+      <label id="ho-up-wrap">直接上游交接编号 <input id="ho-up" size="14" placeholder="如：H-002"></label>
+    </div>
+    <p class="hint" id="ho-format"></p>
+    <textarea id="ho-csv" rows="7"></textarea>
+    <div class="row">
+      <button class="act" id="ho-submit">收表 / 暂存</button>
+      <button class="act" id="ho-resubmit" style="background:#6e7781">改交（更新未入库的表）</button>
+      <button class="link" id="ho-sample">填入二剪示例</button>
+      <button class="link" id="ho-process">处理待办</button>
+    </div>
+    <div class="msg" id="ho-msg"></div>
+  </div>
+  <div class="row">
+    <button class="act" id="ho-refresh">刷新交接表</button>
+    <span class="hint">标黄 = 缺少上游编号或未被上游完整覆盖；依赖它的表继续等待，其他表照常入库。</span>
+  </div>
+  <div id="ho-list"></div>
+  <div id="ho-detail"></div>
+</section>
+
 <!-- ============ 导入 ============ -->
-<section id="tab-import" class="tab active">
+<section id="tab-import" class="tab">
   <div class="card">
     <h3>导入剪辑 CSV（导入后该版固定，不可再改）</h3>
     <p class="hint">每行 4 列：<code>原录音号, 源起点ms, 源终点ms, 成片起点ms</code>。
@@ -135,10 +180,183 @@ document.querySelectorAll("nav button").forEach(btn => {
     document.querySelectorAll("section.tab").forEach(s => s.classList.remove("active"));
     btn.classList.add("active");
     $("tab-" + btn.dataset.tab).classList.add("active");
+    if (btn.dataset.tab === "handover") loadHandovers();
     if (btn.dataset.tab === "versions") loadVersions();
     if (btn.dataset.tab === "markers") loadMarkers();
   });
 });
+
+// ---------- 交接收表 ----------
+function hoKind() { return $("ho-kind").value; }
+
+function updateHoForm() {
+  const recut = hoKind() === "recut";
+  $("ho-up-wrap").style.display = recut ? "" : "none";
+  $("ho-format").innerHTML = recut
+    ? "二剪表每行 3 列：<code>上游起点ms, 上游终点ms, 本版起点ms</code>；"
+      + "首行可为表头 <code>upstream_start_ms,upstream_end_ms,timeline_start_ms</code>。"
+    : "原录音剪辑表每行 4 列：<code>原录音号, 源起点ms, 源终点ms, 成片起点ms</code>；"
+      + "首行可为表头 <code>recording_id,src_start_ms,src_end_ms,timeline_start_ms</code>。";
+}
+
+$("ho-kind").addEventListener("change", updateHoForm);
+updateHoForm();
+
+$("ho-sample").addEventListener("click", () => {
+  $("ho-kind").value = "recut";
+  updateHoForm();
+  $("ho-no").value = "H-003";
+  $("ho-name").value = "三剪短片";
+  $("ho-up").value = "H-001";
+  $("ho-csv").value = [
+    "upstream_start_ms,upstream_end_ms,timeline_start_ms",
+    "1000,3000,0",
+    "5000,6500,2000"
+  ].join("\n");
+});
+
+async function submitHandover(replace) {
+  const msg = $("ho-msg");
+  const no = $("ho-no").value.trim();
+  const body = {
+    handover_no: no,
+    name: $("ho-name").value.trim(),
+    kind: hoKind(),
+    upstream_no: hoKind() === "recut" ? $("ho-up").value.trim() : null,
+    csv_text: $("ho-csv").value,
+  };
+  if (!no) { showMsg(msg, "请填写交接编号。", false); return; }
+  try {
+    const h = replace
+      ? await api("PUT", "/api/handovers/" + encodeURIComponent(body.handover_no), body)
+      : await api("POST", "/api/handovers", body);
+    showMsg(msg, resultText(h), h.status === "admitted" || h.trace_complete);
+    $("ho-csv").value = "";
+    await loadHandovers();
+    showHandover(h.handover_no);
+  } catch (e) { showMsg(msg, (replace ? "改交失败：" : "收表失败：") + e.message, false); }
+}
+
+function resultText(h) {
+  if (h.status === "admitted") {
+    return `交接表 ${h.handover_no} 已整版入库（版本 #${h.version_id}）。`;
+  }
+  let t = `交接表 ${h.handover_no} 已暂存，暂时等待`;
+  if (h.missing_upstream_nos.length) t += `（缺少上游编号：${h.missing_upstream_nos.join("、")}）`;
+  const bad = h.rows.filter(r => r.status !== "ok").length;
+  if (bad) t += `；有 ${bad} 行未被上游完整覆盖`;
+  t += "。依赖它的版本继续等待，其他版本照常入库。";
+  return t;
+}
+
+$("ho-submit").addEventListener("click", () => submitHandover(false));
+$("ho-resubmit").addEventListener("click", () => submitHandover(true));
+$("ho-refresh").addEventListener("click", loadHandovers);
+$("ho-process").addEventListener("click", async () => {
+  const msg = $("ho-msg");
+  try {
+    const list = await api("POST", "/api/handovers/process");
+    const admitted = list.filter(h => h.status === "admitted").length;
+    showMsg(msg, `已处理待办：${list.length} 张交接表，其中 ${admitted} 张已入库。`, true);
+    loadHandovers();
+  } catch (e) { showMsg(msg, "处理失败：" + e.message, false); }
+});
+
+function rowStatusText(r) {
+  if (r.status === "ok") return "完整追溯";
+  if (r.status === "missing_upstream") return "缺少上游编号";
+  if (r.status === "uncovered") return "未被上游完整覆盖";
+  if (r.status === "cycle") return "循环引用";
+  return r.status;
+}
+
+async function loadHandovers() {
+  const list = await api("GET", "/api/handovers");
+  if (!list.length) {
+    $("ho-list").innerHTML = "<p class='hint'>尚未收表。</p>";
+    return;
+  }
+  let h = "<table><tr><th>交接编号</th><th>名称</th><th>类型</th><th>直接上游</th>"
+    + "<th>状态</th><th>行数</th><th>问题</th><th>版本</th><th>操作</th></tr>";
+  for (const x of list) {
+    const problems = [];
+    if (x.missing_upstream_nos.length) problems.push("缺少上游：" + x.missing_upstream_nos.join("、"));
+    if (x.unresolved_row_count)
+      problems.push(`${x.unresolved_row_count} 行未完整覆盖`);
+    const cls = problems.length ? "bad" : (x.status === "admitted" ? "good" : "");
+    h += `<tr class="${cls}">`
+      + `<td>${esc(x.handover_no)}</td><td>${esc(x.name)}</td>`
+      + `<td>${x.kind === "original" ? "原录音" : "二剪"}</td>`
+      + `<td>${x.upstream_no ? esc(x.upstream_no) : "—"}</td>`
+      + `<td><span class="tag ${x.status}">${x.status === "admitted" ? "已入库" : "暂存等待"}</span></td>`
+      + `<td>${x.row_count}</td>`
+      + `<td>${problems.length ? problems.join("<br>") : "—"}</td>`
+      + `<td>${x.version_id ? "#" + x.version_id : "—"}</td>`
+      + `<td><button class="link" onclick="showHandover('${esc(x.handover_no)}')">明细</button></td>`
+      + "</tr>";
+  }
+  $("ho-list").innerHTML = h + "</table>";
+}
+
+async function loadHandoverForm(no) {
+  const h = await api("GET", "/api/handovers/" + encodeURIComponent(no));
+  $("ho-no").value = h.handover_no;
+  $("ho-name").value = h.name;
+  $("ho-kind").value = h.kind;
+  $("ho-up").value = h.upstream_no || "";
+  $("ho-csv").value = h.csv_text;
+  updateHoForm();
+  $("ho-csv").scrollIntoView({ behavior: "smooth" });
+}
+
+async function showHandover(no) {
+  const h = await api("GET", "/api/handovers/" + encodeURIComponent(no));
+  let out = `<div class="card"><h3>交接表 ${esc(h.handover_no)}「${esc(h.name)}」</h3>`;
+  out += `<p>类型：${h.kind === "original" ? "原录音剪辑表" : "二剪表"}`
+    + `；直接上游：${h.upstream_no ? esc(h.upstream_no) : "—"}`
+    + `；状态：<span class="tag ${h.status}">`
+    + `${h.status === "admitted" ? "已入库" : "暂存等待"}</span>`;
+  if (h.version_id) out += `；已入库为版本 #${h.version_id}`;
+  out += "</p>";
+
+  if (h.status !== "admitted") {
+    if (h.missing_upstream_nos.length)
+      out += `<p class="msg err" style="display:block">缺少上游交接编号：${h.missing_upstream_nos.map(esc).join("、")}</p>`;
+    if (h.waiting_on.length)
+      out += `<p class="hint">等待链：${h.waiting_on.map(esc).join(" → ")}；依赖该表的版本继续等待。</p>`;
+    out += `<div class="row"><button class="act" onclick="loadHandoverForm('${esc(h.handover_no)}')">`
+      + "载入表单以改交</button><span class='hint'>改交后可重新提交；形成循环引用会被拒收并保留原表。</span></div>";
+  }
+
+  out += "<h3>表内各行</h3><table><tr><th>行</th><th>本版时段 ms</th><th>来源</th>"
+    + "<th>追溯结果</th><th>未覆盖区间 ms</th></tr>";
+  for (const r of h.rows) {
+    const src = r.recording_id
+      ? `${esc(r.recording_id)} [${r.src_start_ms}, ${r.src_end_ms})`
+      : `上游 [${r.upstream_start_ms}, ${r.upstream_end_ms})`;
+    const miss = r.missing_ranges.length
+      ? r.missing_ranges.map(x => `[${x[0]}, ${x[1]})`).join("<br>") : "—";
+    const cls = r.status === "ok" ? "good" : "warn";
+    out += `<tr class="${cls}"><td>${r.seq}</td>`
+      + `<td>[${r.tl_start_ms}, ${r.tl_end_ms})</td>`
+      + `<td>${src}</td><td>${rowStatusText(r)}</td><td>${miss}</td></tr>`;
+  }
+  out += "</table>";
+
+  out += "<h3>换算到原录音坐标的片段</h3>";
+  out += h.resolved_segments.length
+    ? rangeTable(
+        h.resolved_segments.map(p => [
+          esc(p.recording_id),
+          `[${p.src_start_ms}, ${p.src_end_ms})`,
+          `[${p.tl_start_ms}, ${p.tl_end_ms})`
+        ]),
+        ["原录音号", "源时段 ms", "本版成片时段 ms"])
+    : "<p class='hint'>尚无法换算（等待上游）。</p>";
+  out += "</div>";
+  $("ho-detail").innerHTML = out;
+  $("ho-detail").scrollIntoView({ behavior: "smooth" });
+}
 
 // ---------- 导入 ----------
 $("imp-sample").addEventListener("click", () => {
@@ -167,9 +385,10 @@ async function loadVersions() {
   $("ver-list").innerHTML = rangeTable(
     list.map(v => [
       "#" + v.id, esc(v.name), v.segment_count, esc(v.created_at),
+      v.handover_no ? esc(v.handover_no) : "—",
       `<button class="link" onclick="showVersion(${v.id})">片段 / 遮盖 / 登记标记</button>`
     ]),
-    ["版本", "名称", "片段数", "导入时间", "操作"]);
+    ["版本", "名称", "片段数", "导入时间", "交接编号", "操作"]);
 }
 
 async function showVersion(vid) {
@@ -178,6 +397,7 @@ async function showVersion(vid) {
     api("GET", "/api/versions/" + vid + "/muted"),
   ]);
   let h = `<div class="card"><h3>版本 #${v.id}「${esc(v.name)}」剪辑表（已固定）</h3>`;
+  if (v.handover_no) h += `<p class="hint">交接编号：<code>${esc(v.handover_no)}</code></p>`;
   h += rangeTable(
     v.segments.map(s => [
       s.id, esc(s.recording_id),
@@ -315,6 +535,7 @@ async function liftMarker(mid) {
 }
 
 // ---------- 初始加载 ----------
+loadHandovers();
 loadVersions();
 loadMarkers();
 </script>

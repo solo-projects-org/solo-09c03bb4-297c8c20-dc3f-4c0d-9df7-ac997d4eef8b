@@ -74,6 +74,46 @@ CREATE TABLE IF NOT EXISTS lift_ranges (
     CHECK (src_end_ms > src_start_ms)
 );
 CREATE INDEX IF NOT EXISTS idx_lift_ranges_lift ON lift_ranges(lift_id);
+
+-- 交接表：按交接编号收表。original 直接取用原录音；recut 以另一张交接表为直接上游。
+-- 暂存（pending）的表在依赖齐备并完整追溯后入库（admitted），入库后不可改交。
+CREATE TABLE IF NOT EXISTS handovers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    handover_no TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('original','recut')),
+    upstream_no TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','admitted')),
+    version_id INTEGER UNIQUE REFERENCES versions(id),
+    csv_text TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    CHECK ((kind = 'original' AND upstream_no IS NULL)
+        OR (kind = 'recut' AND upstream_no IS NOT NULL AND length(upstream_no) > 0)),
+    CHECK ((status = 'pending' AND version_id IS NULL)
+        OR (status = 'admitted' AND version_id IS NOT NULL))
+);
+
+-- 交接表的原始行。original：recording_id/src_* 有值；recut：upstream_* 有值。
+-- 两种表都写本版起点 tl_start_ms，区间一律 [起点, 终点)。
+CREATE TABLE IF NOT EXISTS handover_rows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    handover_id INTEGER NOT NULL REFERENCES handovers(id),
+    seq INTEGER NOT NULL,
+    recording_id TEXT,
+    src_start_ms INTEGER,
+    src_end_ms INTEGER,
+    upstream_start_ms INTEGER,
+    upstream_end_ms INTEGER,
+    tl_start_ms INTEGER NOT NULL,
+    CHECK (tl_start_ms >= 0),
+    CHECK (src_start_ms IS NULL OR src_start_ms >= 0),
+    CHECK (src_end_ms IS NULL OR src_end_ms > src_start_ms),
+    CHECK (upstream_start_ms IS NULL OR upstream_start_ms >= 0),
+    CHECK (upstream_end_ms IS NULL OR upstream_end_ms > upstream_start_ms),
+    UNIQUE (handover_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_handover_rows_handover ON handover_rows(handover_id);
 """
 
 

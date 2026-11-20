@@ -83,8 +83,9 @@ def create_version(conn: sqlite3.Connection, name: str, csv_text: str) -> dict:
 
 def list_versions(conn: sqlite3.Connection) -> list[dict]:
     rows = conn.execute(
-        "SELECT v.id, v.name, v.created_at, COUNT(s.id) AS segment_count"
+        "SELECT v.id, v.name, v.created_at, h.handover_no, COUNT(s.id) AS segment_count"
         " FROM versions v LEFT JOIN segments s ON s.version_id = v.id"
+        " LEFT JOIN handovers h ON h.version_id = v.id"
         " GROUP BY v.id ORDER BY v.id"
     ).fetchall()
     return [dict(r) for r in rows]
@@ -98,7 +99,9 @@ def get_version(conn: sqlite3.Connection, version_id: int) -> dict:
 
 def _version_row(conn: sqlite3.Connection, version_id: int) -> dict:
     row = conn.execute(
-        "SELECT id, name, created_at FROM versions WHERE id = ?", (version_id,)
+        "SELECT v.id, v.name, v.created_at, h.handover_no FROM versions v"
+        " LEFT JOIN handovers h ON h.version_id = v.id WHERE v.id = ?",
+        (version_id,),
     ).fetchone()
     if row is None:
         raise DomainError(404, f"版本 {version_id} 不存在")
